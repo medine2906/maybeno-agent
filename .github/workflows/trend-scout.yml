@@ -1,0 +1,67 @@
+name: Haftalık Trend Tarayıcı - Yeni Proje Önerisi
+
+# Bonus/opsiyonel workflow. Herhangi bir repoya (ör. "personal" veya ayrı bir
+# "trend-scout" reposuna) .github/workflows/trend-scout.yml olarak koy.
+# Amaç: haftada bir, güncel AI/teknoloji trendlerine göre sana yeni proje
+# fikirleri önerip Telegram'a göndermek.
+#
+# Not: Bu iş "web arama" gerektirir. claude CLI'nin web araması varsayılan
+# olarak açık değilse, --allowedTools ile web search aracını etkinleştirmen
+# gerekebilir. Claude Code dokümantasyonundan güncel bayrak adını kontrol et.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Her Pazartesi UTC 06:00 (TR ~09:00)
+  workflow_dispatch: {}
+
+jobs:
+  trend-scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Claude Code CLI kur
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Trend araştırması yap
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Son 1 haftada AI/yazılım dünyasında öne çıkan 2-3 önemli
+          gelişmeyi (yeni model, araç, teknik) kısaca özetle. Her biri için:
+          - Ne çıktı, neden önemli (2-3 cümle)
+          - Bunu kullanarak yapılabilecek, CV'ye eklenebilecek küçük bir proje fikri
+          - Bu proje kaç günde bitirilebilir (kabaca)
+          Kısa ve öz yaz, madde madde." \
+            --output-format json > trend-log.json || true
+
+      - name: Telegram'a gönder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          SUMMARY=$(python3 -c "
+          import json
+          try:
+              with open('trend-log.json') as f:
+                  data = json.load(f)
+              text = data.get('result') if isinstance(data, dict) else str(data)
+              print((text or '')[:1500])
+          except Exception as e:
+              print(f'Log okunamadı: {e}')
+          ")
+
+          MESSAGE="📡 *Haftalık Trend Raporu*
+          $(date +%Y-%m-%d)
+
+          $SUMMARY"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode text="$MESSAGE"
