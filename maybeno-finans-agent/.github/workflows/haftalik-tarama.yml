@@ -1,0 +1,128 @@
+name: Finance Agent - Weekly Opportunity Scan (Claude Code + Telegram Report)
+
+# Required secrets: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#
+# IMPORTANT: This agent is NOT a financial advisor. It only scans scholarship,
+# competition, internship/job, and general investment/fund NEWS, and flags it
+# as "may be worth researching." It must never produce personalized financial
+# advice such as "buy/sell this" or "invest in this" — it should only produce
+# an informational summary. The prompt explicitly reminds it of this below.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Every Monday UTC 06:00 (~09:00 TR time)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  haftalik-tarama:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run opportunity scan
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # REMINDER: This agent is not a financial advisor. It is only an
+          # information/opportunity scanner — never produce personalized advice
+          # like "buy this stock" or "invest in this." Only give general
+          # information, news, and a "may be worth researching" note.
+          claude -p "Önce repo kökündeki anayasa.md dosyasını oku ve kurallarına uy. Sonra bu klasördeki KIMLIK.md dosyanı oku (kim olduğun, tonun, sınırların). Sonra HATA-DEFTERI.md dosyanı oku — geçmişte çıkardığın dersleri tekrar etme. Sonra SKILLS.md dosyanı oku, varsa faydalı bulduğun bir yöntemi uygula.
+
+          Şimdi asıl görevin:
+
+          Read the INTERESTS.md file. For each ACTIVE interest area
+          in it, use web search to research current (within the last 1-2 weeks)
+          opportunities and news:
+          - Scholarships and competitions (especially in software/AI, open to students)
+          - Competition prizes and hackathons
+          - Internship / new-grad job listings (including finance and technology intersection)
+          - General investment/fund news (student-oriented funds, market
+            developments — ONLY as general information/news, never as personal
+            advice like 'buy/sell this')
+
+          For each opportunity/news item you find, use this format:
+          - Title / what it is
+          - Source / where it was found (link if available)
+          - Application deadline (if any)
+          - A 'why this might interest you' note (explain in 1-2 sentences
+            which interest area in INTERESTS.md it matches and why it's relevant)
+
+          VERY IMPORTANT RULES:
+          - You are not a financial advisor. Never give direct investment advice
+            such as 'buy this stock,' 'invest in this fund,' or 'buy now.'
+          - Present everything related to investments/funds only as NEWS/
+            INFORMATION, adding the note 'this is general information, not
+            investment advice, it may be worth researching' where needed.
+          - Do not present information you are unsure of or cannot verify as certain.
+
+          At the end, give a short summary (at most 8-10 bullet points,
+          highlighting the most relevant opportunities). If no opportunities
+          are found, state this clearly.
+
+          İşin bitiminde: Bu çalışmadan çıkardığın YENİ bir ders veya fark ettiğin bir hata varsa, HATA-DEFTERI.md dosyasının sonuna anayasa.md §4'teki formatla (## YYYY-MM-DD başlığı, 'Ne oldu' ve 'Ders' maddeleri) ekle; yoksa dosyaya dokunma. HATA-DEFTERI.md ~200 satırı geçtiyse eski kısmı özetleyip hata-arsivi/YYYY-MM.md dosyasına taşı ve ana dosyada özet + güncel kısmı bırak. Tekrar eden faydalı bir yöntem keşfettiysen SKILLS.md'ye kısaca ekle." \
+            --allowedTools "WebSearch" \
+            --output-format json > tarama-log.json || true
+
+      - name: Git kullanıcı bilgisi ayarla
+        run: |
+          git config user.name "finans-agent-bot"
+          git config user.email "finans-agent-bot@users.noreply.github.com"
+
+      - name: Bellek dosyalarını commit'le
+        run: |
+          git add HATA-DEFTERI.md SKILLS.md hata-arsivi/ 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Ajan hafizasi guncellemesi $(date +%Y-%m-%d)"
+          git push origin HEAD:main || echo "Push edilecek değişiklik yok"
+
+      - name: Store log file
+        uses: actions/upload-artifact@v4
+        with:
+          name: haftalik-tarama-log-${{ github.run_id }}
+          path: tarama-log.json
+
+      - name: Extract summary and send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          SUMMARY=$(python3 -c "
+          import json
+          try:
+              with open('tarama-log.json') as f:
+                  data = json.load(f)
+              text = ''
+              if isinstance(data, dict):
+                  text = data.get('result') or data.get('summary') or str(data)[:1500]
+              elif isinstance(data, list):
+                  text = ' '.join(str(x) for x in data)[:1500]
+              print(text[:3500])
+          except Exception as e:
+              print(f'Could not read log: {e}')
+          ")
+
+          MESSAGE="💰 *Finance Agent — Weekly Opportunity Scan*
+          $(date +%Y-%m-%d)
+
+          ⚠️ This agent is not a financial advisor, it is only an information/opportunity scanner.
+
+          $SUMMARY"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode text="$MESSAGE"

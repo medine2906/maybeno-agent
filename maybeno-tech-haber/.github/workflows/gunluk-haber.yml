@@ -1,0 +1,130 @@
+name: Daily Tech News Agent (Claude Code + Telegram)
+
+# Required secrets: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#
+# NOTE: For this workflow to work, the Claude Code CLI needs to be able to
+# perform web searches (WebSearch). That's why the `claude -p` command
+# below has the `--allowedTools "WebSearch"` flag — the flag's name may
+# change depending on the CLI version, so check the current documentation
+# and update the `--allowedTools` list if needed.
+# `--dangerously-skip-permissions` may already allow all tools, but
+# explicitly keeping WebSearch allowed is more reliable.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # UTC 06:00 = ~09:00 Turkey time
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  gunluk-haber:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run Claude Code (news research)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Önce repo kökündeki anayasa.md dosyasını oku ve kurallarına uy. Sonra bu klasördeki KIMLIK.md dosyanı oku (kim olduğun, tonun, sınırların). Sonra HATA-DEFTERI.md dosyanı oku — geçmişte çıkardığın dersleri tekrar etme. Sonra SKILLS.md dosyanı oku, varsa faydalı bulduğun bir yöntemi uygula.
+
+          Şimdi asıl görevin:
+
+          You are a tech/AI news tracking assistant. Your task:
+          find 1-3 important AI/software developments published in the last
+          24-48 hours by performing a web search.
+
+          Below are the topics the user is specifically interested in
+          following (the content of TOPICS-TO-FOLLOW.md). Shape your search
+          queries around these topics, and prioritize any genuinely fresh
+          and important development related to one of them:
+
+          ---
+          $(cat TOPICS-TO-FOLLOW.md)
+          ---
+
+          For EACH development you find, write separately, in exactly the
+          following format (English, short and clear, emoji allowed):
+
+          📰 *[Short title of the development]*
+
+          *What happened:* (1-2 sentences, what occurred)
+          *Why it matters:* (1-2 sentences, who it concerns and why)
+          *Mini experiment idea (15-30 min):* (a concrete, actionable mini
+          experiment/exercise that can be tried right away with this — it
+          can involve writing code, trying out a tool, or doing a small
+          bit of research)
+
+          If there's a source/link, add it below.
+
+          Find at least 1, at most 3 developments. If you can't find
+          anything genuinely new and important, say so honestly — do not
+          fabricate news.
+
+          At the end, give ALL the developments back to back, in the format
+          above, as plain text. This output will be sent directly as a
+          Telegram message, so don't add an unnecessary title/greeting.
+
+          İşin bitiminde: Bu çalışmadan çıkardığın YENİ bir ders veya fark ettiğin bir hata varsa, HATA-DEFTERI.md dosyasının sonuna anayasa.md §4'teki formatla (## YYYY-MM-DD başlığı, 'Ne oldu' ve 'Ders' maddeleri) ekle; yoksa dosyaya dokunma. HATA-DEFTERI.md ~200 satırı geçtiyse eski kısmı özetleyip hata-arsivi/YYYY-MM.md dosyasına taşı ve ana dosyada özet + güncel kısmı bırak. Tekrar eden faydalı bir yöntem keşfettiysen SKILLS.md'ye kısaca ekle." \
+            --allowedTools "WebSearch" \
+            --dangerously-skip-permissions \
+            --output-format json > haber-log.json || true
+
+      - name: Git kullanıcı bilgisi ayarla
+        run: |
+          git config user.name "tech-haber-bot"
+          git config user.email "tech-haber-bot@users.noreply.github.com"
+
+      - name: Bellek dosyalarını commit'le
+        run: |
+          git add HATA-DEFTERI.md SKILLS.md hata-arsivi/ 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Ajan hafizasi guncellemesi $(date +%Y-%m-%d)"
+          git push origin HEAD:main || echo "Push edilecek değişiklik yok"
+
+      - name: Store log file
+        uses: actions/upload-artifact@v4
+        with:
+          name: gunluk-haber-log-${{ github.run_id }}
+          path: haber-log.json
+
+      - name: Extract summary and send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          SUMMARY=$(python3 -c "
+          import json
+          try:
+              with open('haber-log.json') as f:
+                  data = json.load(f)
+              text = ''
+              if isinstance(data, dict):
+                  text = data.get('result') or data.get('summary') or str(data)[:3500]
+              elif isinstance(data, list):
+                  text = ' '.join(str(x) for x in data)[:3500]
+              print(text[:3500])
+          except Exception as e:
+              print(f'Could not read log: {e}')
+          ")
+
+          MESSAGE="🧪 *Daily Tech News* — $(date +%Y-%m-%d)
+
+          $SUMMARY"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode text="$MESSAGE"

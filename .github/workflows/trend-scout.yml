@@ -14,12 +14,18 @@ on:
     - cron: "0 6 * * 1"   # Her Pazartesi UTC 06:00 (TR ~09:00)
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   trend-scout:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
+      - name: Repo'yu çek
+        uses: actions/checkout@v4
+
       - name: Node.js kur
         uses: actions/setup-node@v4
         with:
@@ -28,17 +34,34 @@ jobs:
       - name: Claude Code CLI kur
         run: npm install -g @anthropic-ai/claude-code
 
+      - name: Git kullanıcı bilgisi ayarla
+        run: |
+          git config user.name "trend-scout-bot"
+          git config user.email "trend-scout-bot@users.noreply.github.com"
+
       - name: Trend araştırması yap
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          claude -p "Son 1 haftada AI/yazılım dünyasında öne çıkan 2-3 önemli
+          claude -p "Önce anayasa.md dosyasını oku ve kurallarına uy. Sonra KIMLIK.md dosyanı oku (kim olduğun, tonun, sınırların). Sonra HATA-DEFTERI.md dosyanı oku — geçmişte çıkardığın dersleri tekrar etme. Sonra SKILLS.md dosyanı oku, varsa faydalı bulduğun bir yöntemi uygula.
+
+          Şimdi asıl görevin:
+
+          Son 1 haftada AI/yazılım dünyasında öne çıkan 2-3 önemli
           gelişmeyi (yeni model, araç, teknik) kısaca özetle. Her biri için:
           - Ne çıktı, neden önemli (2-3 cümle)
           - Bunu kullanarak yapılabilecek, CV'ye eklenebilecek küçük bir proje fikri
           - Bu proje kaç günde bitirilebilir (kabaca)
-          Kısa ve öz yaz, madde madde." \
+          Kısa ve öz yaz, madde madde.
+
+          İşin bitiminde: Bu çalışmadan çıkardığın YENİ bir ders veya fark ettiğin bir hata varsa, HATA-DEFTERI.md dosyasının sonuna anayasa.md §4'teki formatla (## YYYY-MM-DD başlığı, 'Ne oldu' ve 'Ders' maddeleri) ekle; yoksa dosyaya dokunma. HATA-DEFTERI.md ~200 satırı geçtiyse eski kısmı özetleyip hata-arsivi/YYYY-MM.md dosyasına taşı ve ana dosyada özet + güncel kısmı bırak. Tekrar eden faydalı bir yöntem keşfettiysen SKILLS.md'ye kısaca ekle." \
             --output-format json > trend-log.json || true
+
+      - name: Bellek dosyalarını commit'le
+        run: |
+          git add HATA-DEFTERI.md SKILLS.md hata-arsivi/ 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Ajan hafizasi guncellemesi $(date +%Y-%m-%d)"
+          git push origin HEAD:main || echo "Push edilecek değişiklik yok"
 
       - name: Telegram'a gönder
         env:

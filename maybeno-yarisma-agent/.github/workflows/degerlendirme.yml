@@ -1,0 +1,184 @@
+name: Competition Evaluation Agent (Claude Code + Telegram Report)
+
+# This workflow runs every day. For every row in COMPETITION-POOL.md with status
+# "Evaluating", it does web research, evaluates fit with the user's profile,
+# identifies the required skills, writes the topics that need to be learned to
+# TOPICS-TO-TEACH.md, updates the status in COMPETITION-POOL.md, and sends a
+# summary to Telegram.
+#
+# Required secrets: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+on:
+  schedule:
+    - cron: "0 1 * * *"   # UTC 01:00 = ~04:00 Turkey time
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  degerlendir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Create working branch
+        run: |
+          BRANCH="degerlendirme-agent/$(date +%Y-%m-%d)"
+          git checkout -b "$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Set git user info
+        run: |
+          git config user.name "degerlendirme-agent-bot"
+          git config user.email "degerlendirme-agent-bot@users.noreply.github.com"
+
+      - name: Run Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Önce repo kökündeki anayasa.md dosyasını oku ve kurallarına uy. Sonra bu klasördeki KIMLIK.md dosyanı oku (kim olduğun, tonun, sınırların). Sonra HATA-DEFTERI.md dosyanı oku — geçmişte çıkardığın dersleri tekrar etme. Sonra SKILLS.md dosyanı oku, varsa faydalı bulduğun bir yöntemi uygula.
+
+          Şimdi asıl görevin:
+
+          You are a competition/hackathon evaluation agent. Your task is to
+          read COMPETITION-POOL.md and do the following for EVERY row with status
+          'Evaluating':
+
+          User profile: 3rd-year chemical engineering student, builds AI / software
+          projects (as a hobby and for learning purposes, has coding experience but is
+          not a computer science/software engineering graduate).
+
+          For each 'Evaluating' row:
+          1. Do a web search to research the competition/hackathon's content, entry
+             requirements, judging criteria, and application deadline (if a link is
+             given, visit it first).
+          2. Evaluate whether this competition fits the user's profile (topic
+             relevance, required technical level, team requirements, location/
+             eligibility, etc.).
+          3. List the skills the competition requires.
+          4. Write a general observation about the chances of winning / competition
+             level (e.g. is it a large/national competition, or niche with low
+             participation, who has won in previous years if you can find that
+             information).
+          5. Identify the concrete topics the user needs to learn to prepare for this
+             competition and add them to TOPICS-TO-TEACH.md, following the existing
+             format (### [Competition name] — Topic name, Why needed, Priority, Date
+             added). If the 'No topics added yet' placeholder line is present, remove
+             it.
+          6. Update the Status column of that row in COMPETITION-POOL.md to 'Good Fit'
+             or 'Not a Fit' based on your evaluation. Don't break the table, only
+             change the relevant cell.
+
+          If there are no rows with status 'Evaluating', don't change any file, just
+          state that.
+
+          At the end of the task, always write a short summary (at most 8-10 bullet
+          points, 1-2 bullet points per evaluated competition):
+          - Which competitions were evaluated and the result (Good Fit / Not a Fit)
+          - Brief reasoning
+          - Number of topics-to-teach added
+          Give this summary in a separate section under the heading 'SUMMARY:'.
+
+          İşin bitiminde: Bu çalışmadan çıkardığın YENİ bir ders veya fark ettiğin bir hata varsa, HATA-DEFTERI.md dosyasının sonuna anayasa.md §4'teki formatla (## YYYY-MM-DD başlığı, 'Ne oldu' ve 'Ders' maddeleri) ekle; yoksa dosyaya dokunma. HATA-DEFTERI.md ~200 satırı geçtiyse eski kısmı özetleyip hata-arsivi/YYYY-MM.md dosyasına taşı ve ana dosyada özet + güncel kısmı bırak. Tekrar eden faydalı bir yöntem keşfettiysen SKILLS.md'ye kısaca ekle." \
+            --dangerously-skip-permissions \
+            --output-format json > degerlendirme-log.json || true
+
+      - name: Bellek dosyalarını commit'le
+        # Anayasa.md §3'e göre bellek dosyaları (HATA-DEFTERI.md, SKILLS.md,
+        # hata-arsivi/) PR beklemeden doğrudan main'e gidebilir. Bu yüzden
+        # bu adım, asıl değerlendirme değişikliklerinin PR ile gitmesinden
+        # önce sadece bellek dosyalarını ayrı bir commit'le main'e gönderir.
+        run: |
+          git add HATA-DEFTERI.md SKILLS.md hata-arsivi/ 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Ajan hafizasi guncellemesi $(date +%Y-%m-%d)"
+          git push origin HEAD:main || echo "Push edilecek değişiklik yok"
+
+      - name: Commit changes
+        run: |
+          git add -A
+          git diff --cached --quiet || git commit -m "Evaluation agent: automatic update $(date +%Y-%m-%d)"
+
+      - name: Check whether there are changes
+        id: check-changes
+        run: |
+          if git diff --quiet origin/main "$BRANCH" -- 2>/dev/null; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push branch
+        if: steps.check-changes.outputs.changed == 'true'
+        run: git push origin "$BRANCH"
+
+      - name: Open pull request
+        if: steps.check-changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "Competition Evaluation - $(date +%Y-%m-%d)" \
+            --body "Automatic competition evaluation PR. See the Actions log for details." \
+            --base main \
+            --head "$BRANCH" || echo "Could not open PR (maybe one already exists)"
+
+      - name: Store log file
+        uses: actions/upload-artifact@v4
+        with:
+          name: degerlendirme-log-${{ github.run_id }}
+          path: degerlendirme-log.json
+
+      - name: Extract summary and send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          CHANGED="${{ steps.check-changes.outputs.changed }}"
+
+          SUMMARY=$(python3 -c "
+          import json
+          try:
+              with open('degerlendirme-log.json') as f:
+                  data = json.load(f)
+              text = ''
+              if isinstance(data, dict):
+                  text = data.get('result') or data.get('summary') or str(data)[:1000]
+              elif isinstance(data, list):
+                  text = ' '.join(str(x) for x in data)[:1000]
+              print(text[:1200])
+          except Exception as e:
+              print(f'Could not read log: {e}')
+          ")
+
+          if [ "$CHANGED" = "true" ]; then
+            STATUS="✅ Evaluation done, PR opened"
+          else
+            STATUS="ℹ️ No new competitions to evaluate"
+          fi
+
+          MESSAGE="🏆 *Competition Evaluation Report*
+          $(date +%Y-%m-%d)
+
+          $STATUS
+
+          $SUMMARY"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode text="$MESSAGE"

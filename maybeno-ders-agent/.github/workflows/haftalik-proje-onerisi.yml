@@ -1,0 +1,142 @@
+name: Weekly Project Idea (CV Agent + Telegram)
+
+# Runs every Sunday. Looks at the past week's topics in DAILY-TOPICS.md,
+# generates small project ideas that could be added to a CV, appends them
+# to the top of PROJECT-IDEAS.md, and sends them to Telegram.
+# Required secrets: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+on:
+  schedule:
+    - cron: "0 7 * * 0"   # Every Sunday UTC 07:00 = ~10:00 TR time
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  haftalik-proje-onerisi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Determine date
+        run: |
+          echo "TARIH=$(TZ='Europe/Istanbul' date +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Configure git user
+        run: |
+          git config user.name "ders-agent-bot"
+          git config user.email "ders-agent-bot@users.noreply.github.com"
+
+      - name: Generate project idea with Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Önce repo kökündeki anayasa.md dosyasını oku ve kurallarına uy. Sonra bu klasördeki KIMLIK.md dosyanı oku (kim olduğun, tonun, sınırların). Sonra HATA-DEFTERI.md dosyanı oku — geçmişte çıkardığın dersleri tekrar etme. Sonra SKILLS.md dosyanı oku, varsa faydalı bulduğun bir yöntemi uygula.
+
+          Şimdi asıl görevin:
+
+          Below is the content of a 3rd-year chemical
+          engineering student's DAILY-TOPICS.md file. Look at the topics
+          from the past week in this file (the most recent entries are at
+          the top).
+
+          Suggest 2-3 SMALL PROJECT IDEAS related to these topics that
+          could be added to a CV (e.g. a calculation tool, a simulation
+          script, a data analysis/visualization project, a small web/Python
+          tool — prefer ideas that combine chemical engineering topics with
+          software/data skills). For each idea, give:
+          - A short title
+          - A 1-2 sentence description (what it does, which topic it draws from)
+          - Roughly how many days it would take to finish
+          - 1-2 suggested tools/libraries that could be used
+
+          If the topic history is insufficient (DAILY-TOPICS.md is empty),
+          suggest general ideas appropriate for a 3rd-year chemical
+          engineering curriculum (thermodynamics, fluid mechanics,
+          mass/energy balances, process control, etc.) and mention this.
+
+          Give the output as plain text, in bullet points. Do not add a
+          heading, start directly with the ideas. Do not use a Markdown
+          table.
+
+          DAILY-TOPICS.md content:
+          $(cat DAILY-TOPICS.md)
+
+          İşin bitiminde: Bu çalışmadan çıkardığın YENİ bir ders veya fark ettiğin bir hata varsa, HATA-DEFTERI.md dosyasının sonuna anayasa.md §4'teki formatla (## YYYY-MM-DD başlığı, 'Ne oldu' ve 'Ders' maddeleri) ekle; yoksa dosyaya dokunma. HATA-DEFTERI.md ~200 satırı geçtiyse eski kısmı özetleyip hata-arsivi/YYYY-MM.md dosyasına taşı ve ana dosyada özet + güncel kısmı bırak. Tekrar eden faydalı bir yöntem keşfettiysen SKILLS.md'ye kısaca ekle." \
+            --dangerously-skip-permissions \
+            --output-format json > proje-log.json || true
+
+      - name: Bellek dosyalarını commit'le
+        run: |
+          git add HATA-DEFTERI.md SKILLS.md hata-arsivi/ 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Ajan hafizasi guncellemesi $(date +%Y-%m-%d)"
+          git push origin HEAD:main || echo "Push edilecek değişiklik yok"
+
+      - name: Extract suggestion, append to file, and send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          ONERI=$(python3 -c "
+          import json
+          try:
+              with open('proje-log.json') as f:
+                  data = json.load(f)
+              text = ''
+              if isinstance(data, dict):
+                  text = data.get('result') or data.get('summary') or str(data)[:2000]
+              elif isinstance(data, list):
+                  text = ' '.join(str(x) for x in data)[:2000]
+              print(text[:2000])
+          except Exception as e:
+              print(f'Could not read log: {e}')
+          ")
+
+          # Append to the top of PROJECT-IDEAS.md (right below the heading)
+          python3 -c "
+          import io
+
+          with open('PROJECT-IDEAS.md', encoding='utf-8') as f:
+              content = f.read()
+
+          oneri = '''$ONERI'''
+          tarih = '${TARIH}'
+          yeni_blok = f'## {tarih}\n\n{oneri}\n\n---\n'
+
+          marker = '---\n'
+          idx = content.find(marker)
+          if idx != -1:
+              basta = content[:idx]
+              sonra = content[idx + len(marker):]
+              yeni_icerik = basta + yeni_blok + '\n' + sonra
+          else:
+              yeni_icerik = content.rstrip() + '\n\n' + yeni_blok + '\n'
+
+          with open('PROJECT-IDEAS.md', 'w', encoding='utf-8') as f:
+              f.write(yeni_icerik)
+          "
+
+          git add PROJECT-IDEAS.md
+          git diff --cached --quiet || git commit -m "Weekly project idea: ${TARIH}"
+          git push || echo "Push may have failed (permissions/branch protection) - Telegram message will still be sent"
+
+          MESSAGE="💡 *Weekly Project Idea — ${TARIH}*
+
+          $ONERI"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode text="$MESSAGE"

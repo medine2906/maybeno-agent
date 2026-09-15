@@ -1,0 +1,19 @@
+# Secrets — asla commit edilmez
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Ajan çalışma logları (workflow artifact olarak zaten saklanıyor)
+*.log
+night-agent-log.json
+trend-log.json
+
+# OS / editör
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
